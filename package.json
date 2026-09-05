@@ -1,8 +1,13 @@
 {
   "name": "mikser-io-assets",
   "version": "1.0.0",
-  "description": "Asset derivatives for mikser-io. Preset modules turn source files into derived outputs — images, video, anything a renderer can write — with completed-render markers, incremental reuse and recovery from an interrupted derive.",
+  "description": "Asset derivatives for mikser-io. Preset modules turn source files into derived outputs \u2014 images, video, anything a renderer can write \u2014 with completed-render markers, incremental reuse and recovery from an interrupted derive.",
   "main": "index.js",
+  "files": [
+    "index.js",
+    "lib/",
+    "README.md"
+  ],
   "type": "module",
   "scripts": {
     "test": "node --no-warnings --test --test-reporter=spec --test-timeout=60000 'test/**/*.test.js'"
