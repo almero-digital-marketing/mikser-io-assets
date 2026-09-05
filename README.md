@@ -72,6 +72,139 @@ video stays on the site until someone notices.
 does not check its exit code, it resolves, the manifest records the truncated
 bytes, and `--audit-output` reads green. Check your exit codes.
 
+## Where a preset comes from
+
+A preset name resolves in two places, local first:
+
+1. **`presets/<name>.js`** in your project — the common case.
+2. **An npm package `mikser-io-preset-<name>`** — when no local file exists, the plugin resolves the name from your project's `node_modules`. Install a shared preset (`npm install mikser-io-preset-thumbnail`) and reference it by name in the `presets` option with no local file. Same resolution convention as `post-*` plugins.
+
+A local file always wins over an npm package of the same name — drop `presets/thumbnail.js` to override one preset from a package while leaving the rest. The two have different update lifetimes: local presets reload on file change in watch mode; npm presets are versioned by their package (bump the dependency to update). `node_modules` is never watched.
+
+If a configured preset name resolves to neither a local file nor an npm package, the plugin logs `Preset not found: <name> ...` and skips it — the rest of the build proceeds.
+
+## Preset module shape
+
+A preset is a default-exported async function. It receives the entity being processed (with `source`, `destination`, `preset`, `name`, etc.), runs whatever code it needs, and resolves (or rejects) when done.
+
+```js
+export const revision = 1     // bump to force re-render (cache-bust)
+export const format = 'webp'  // output format hint (used in the destination filename)
+
+export default async ({ entity, runtime, logger }) => {
+    // entity.source       — input file on disk
+    // entity.destination  — where to write the result
+    // entity.preset       — config of the matching preset (name, source, options)
+    // entity.name         — original entity name (e.g. '/files/images/hero.jpg')
+    // runtime / logger    — mikser context, including runtime.options for paths
+}
+```
+
+That is the whole contract.
+
+## Example: Video transcoding via ffmpeg
+
+A 720×1080 portrait MP4 at 600kbps for the web. fluent-ffmpeg streams progress events back into mikser's logger so the build progress bar reflects encoder progress in real time.
+
+```js
+// presets/video-web.js
+import ffmpeg from 'fluent-ffmpeg'
+
+export const revision = 7
+export const format = 'mp4'
+
+export default ({ entity: { name, source, destination, preset }, logger }) => {
+    return new Promise((resolve, reject) => {
+        ffmpeg(source)
+            .videoCodec('libx264')
+            .size('810x1080')
+            .videoBitrate(600)
+            .outputOptions('-strict -2')
+            .on('progress', ({ percent }) =>
+                logger.trace(`Progress: [${preset.name}] ${name} ${Math.round(percent)}%`))
+            .on('error', reject)
+            .on('end', resolve)
+            .save(destination)
+    })
+}
+```
+
+10 lines of glue around ffmpeg. Every published video in the catalog gets transcoded; rebuilds skip unchanged inputs because the journal tracks file mtimes; bumping `revision` re-encodes everything (useful when you change the bitrate).
+
+## Example: Image variants via sharp
+
+Resize + format negotiation. Most projects want srcset variants in WebP and AVIF; this preset emits both with a single sharp pipeline.
+
+```js
+// presets/image-2x.js
+import sharp from 'sharp'
+import { dirname, basename, extname, join } from 'node:path'
+import { mkdir } from 'node:fs/promises'
+
+export const revision = 3
+
+export default async ({ entity: { source, destination }, logger }) => {
+    const dir   = dirname(destination)
+    const stem  = basename(destination, extname(destination))
+    await mkdir(dir, { recursive: true })
+
+    const pipeline = sharp(source).rotate()       // honor EXIF orientation
+    // 2× variants for each format
+    await Promise.all([
+        pipeline.clone().resize({ width: 1600 }).webp({ quality: 85 }).toFile(join(dir, `${stem}@2x.webp`)),
+        pipeline.clone().resize({ width: 1600 }).avif({ quality: 60 }).toFile(join(dir, `${stem}@2x.avif`)),
+        pipeline.clone().resize({ width: 800  }).webp({ quality: 85 }).toFile(join(dir, `${stem}.webp`)),
+        pipeline.clone().resize({ width: 800  }).avif({ quality: 60 }).toFile(join(dir, `${stem}.avif`)),
+    ])
+    logger.trace('image-2x emitted 4 variants for %s', source)
+}
+```
+
+One preset, four output files per input image. The render-href plugin can then rewrite `<img src="hero.jpg">` to the `@2x.webp` URL with a fallback `<source>` chain — but that's a render-time concern, not the asset plugin's.
+
+## Composition with `resources`
+
+The assets plugin processes whatever's on disk. Source files don't have to start in your repo — the **resources plugin** in mikser-io pulls them from external systems (company content servers, S3, vendor APIs) into the working folder so assets can then process them. That composition is where the "advanced pipeline" idea pays off: resources fetches, assets derives, and the render helpers link to the result.
+
+## Watch support
+
+Yes — the plugin watches both the source files and the preset modules. Editing a preset re-processes every input that matches it; editing a source re-processes just that input.
+
+
+**Derivatives with no source are removed.** A derivative outlived its source:
+deleting a file removed its catalog row and its published copy and left the
+derived file, because the delete handler dropped the in-memory mapping and
+nothing on disk. Narrowing a preset's `match` left one the same way. A stale
+derivative passes every check — the url resolves and the bytes are there —
+so the only cleanup was `--clear`, or deleting it by hand.
+
+The post-cycle pass that already walks the revision markers now also asks, per
+derivative, whether it still has a source that this preset still covers. It is
+answered from the **catalog**, not from the delete event: a delete entry is
+sparse (`{ id, type, collection }`) in every source plugin, so it cannot say
+where the derivative went, while the catalog answers whatever route the orphan
+arrived by — including ones that predate the fix. Reported as
+`Assets removed: N derivative(s) with no source`.
+
+It does nothing when the catalog is empty. Every check concludes "no source,
+therefore orphan", and an empty catalog answers that for every derivative on
+the site, so a failed import would otherwise delete the whole assets folder.
+
+---
+
+## Derivatives with no source are removed
+
+A derivative can outlive its source: deleting a file removes its catalog row
+and its published copy, and a stale derivative passes every check — the URL
+resolves and the bytes are there — so the only cleanup used to be `--clear`
+or deleting it by hand. Narrowing a preset's `match` left one the same way.
+
+The post-cycle pass that walks the revision markers also asks, per derivative,
+whether it still has a source that this preset still covers, and removes the
+ones that do not. It stands down entirely when the catalog is empty: every
+check there concludes "no source, therefore orphan", and a failed import would
+otherwise delete the whole derived tree.
+
 ## Options
 
 | Option | Default | Meaning |
