@@ -1,6 +1,6 @@
 {
   "name": "mikser-io-assets",
-  "version": "11.0.1",
+  "version": "11.1.0",
   "description": "Asset derivatives for mikser-io. Preset modules turn source files into derived outputs — images, video, anything a renderer can write — with completed-render markers, incremental reuse and recovery from an interrupted derive.",
   "main": "index.js",
   "files": [
@@ -23,7 +23,7 @@
   },
   "homepage": "https://github.com/almero-digital-marketing/mikser-io-assets#readme",
   "peerDependencies": {
-    "mikser-io": "^11.0.1"
+    "mikser-io": "^11.1.0"
   },
   "dependencies": {
     "globby": "^14.0.0",
@@ -31,7 +31,7 @@
     "p-map": "^7.0.0"
   },
   "devDependencies": {
-    "mikser-io": "^11.0.1",
+    "mikser-io": "^11.1.0",
     "mikser-io-layouts": "^11.0.1"
   }
 }
