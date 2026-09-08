@@ -2,6 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { format } from 'node:util'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -380,6 +381,111 @@ describe('assets plugin: a preset that matched nothing', () => {
             assert.deepEqual(
                 h.logs.filter(l => l.level === 'warn' && l.args.join(' ').includes('Assets preset')),
                 [])
+        })
+    })
+})
+
+describe('assets plugin: the orphan sweep and a shared stem', () => {
+    // Splitting presets by EXTENSION over one shared stem is the ordinary way
+    // to ask for two derivatives of one product photo — a 16:9 poster from the
+    // .jpg, a transparent cutout from the .png:
+    //
+    //   'product-poster': '/files/img/products/*.jpg'
+    //   'product-image':  '/files/img/products/*.png'
+    //
+    // `sourceByStem()` returns an ARRAY for exactly this reason: it pushes,
+    // because stems collide. The sweep took `[0]`, which threw the collision
+    // away — so a derivative was judged against a file that had nothing to do
+    // with it, found "uncovered", and unlinked.
+    //
+    // gpoint-cms has four such stems. `[0]` handed back the .jpg,
+    // `product-image` does not cover a .jpg, and a good .webp was deleted with
+    // no warning, because from inside the sweep it looked exactly like an
+    // orphan. Which file won was down to catalog iteration order, so the same
+    // config could behave differently on two machines.
+    //
+    // This test destroys nothing when it passes, which is the point: the
+    // failure mode is silent data loss on someone else's disk.
+    const preset = `export const revision = 1\nexport const format = 'webp'\nexport default () => {}\n`
+
+    const jpg = {
+        id: '/files/img/products/GP-PEX-ABC-30ML.jpg', name: 'img/products/GP-PEX-ABC-30ML',
+        collection: 'files', type: 'file', format: 'jpg', checksum: 'aaa',
+    }
+    const png = {
+        id: '/files/img/products/GP-PEX-ABC-30ML.png', name: 'img/products/GP-PEX-ABC-30ML',
+        collection: 'files', type: 'file', format: 'png', checksum: 'bbb',
+    }
+
+    // Both orders, because the bug's outcome depended on which entity the
+    // catalog walk reached first — so one order would have passed against the
+    // broken code and proved nothing.
+    for (const [label, entities] of [['jpg first', [jpg, png]], ['png first', [png, jpg]]]) {
+        it(`keeps both derivatives when the stems collide (${label})`, async () => {
+            await withPresetProject({
+                entities,
+                npmPresets: { poster: preset, cutout: preset },
+                runOptions: { force: true },
+                assetsOptions: {
+                    presets: {
+                        poster: { match: '/files/img/products/*.jpg' },
+                        cutout: { match: '/files/img/products/*.png' },
+                    },
+                },
+            }, async (h) => {
+                const assetsFolder = h.runtime.options.assetsFolder
+                const derivatives = [
+                    ['poster', 'img/products/GP-PEX-ABC-30ML.webp'],
+                    ['cutout', 'img/products/GP-PEX-ABC-30ML.webp'],
+                ]
+                // Lay down what a previous successful run would have left:
+                // the derivative plus its `<name>.<revision>.md5` marker.
+                for (const [name, file] of derivatives) {
+                    const dir = path.join(assetsFolder, name, path.dirname(file))
+                    await mkdir(dir, { recursive: true })
+                    await writeFile(path.join(assetsFolder, name, file), 'derived bytes')
+                    await writeFile(path.join(assetsFolder, name, `${file}.1.md5`), 'marker')
+                }
+
+                await h.runHook('finalize')
+
+                for (const [name, file] of derivatives) {
+                    const at = path.join(assetsFolder, name, file)
+                    assert.ok(existsSync(at),
+                        `${name}/${file} was deleted — its source is right there\n`
+                        + h.logs.filter(l => l.args.join(' ').includes('Assets removed'))
+                            .map(l => format(...l.args)).join('\n'))
+                    assert.ok(existsSync(`${at}.1.md5`), `${name}: the marker went too`)
+                }
+            })
+        })
+    }
+
+    it('still removes a derivative no preset covers, stem collision or not', async () => {
+        // The guard must not become "never delete anything". A third preset
+        // folder whose source really is absent has to go, or the fix has
+        // traded silent deletion for silent accumulation.
+        await withPresetProject({
+            entities: [jpg, png],
+            npmPresets: { poster: preset, cutout: preset },
+            runOptions: { force: true },
+            assetsOptions: {
+                presets: {
+                    poster: { match: '/files/img/products/*.jpg' },
+                    cutout: { match: '/files/img/products/*.png' },
+                },
+            },
+        }, async (h) => {
+            const assetsFolder = h.runtime.options.assetsFolder
+            const gone = path.join(assetsFolder, 'poster', 'img/products/DELETED-SOURCE.webp')
+            await mkdir(path.dirname(gone), { recursive: true })
+            await writeFile(gone, 'derived bytes')
+            await writeFile(`${gone}.1.md5`, 'marker')
+
+            await h.runHook('finalize')
+
+            assert.equal(existsSync(gone), false,
+                'a derivative whose source is genuinely absent is still an orphan')
         })
     })
 })
