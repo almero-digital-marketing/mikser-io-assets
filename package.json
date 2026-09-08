@@ -1,6 +1,6 @@
 {
   "name": "mikser-io-assets",
-  "version": "11.1.0",
+  "version": "11.1.1",
   "description": "Asset derivatives for mikser-io. Preset modules turn source files into derived outputs — images, video, anything a renderer can write — with completed-render markers, incremental reuse and recovery from an interrupted derive.",
   "main": "index.js",
   "files": [
