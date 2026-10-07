@@ -90,6 +90,9 @@ A preset is a default-exported async function. It receives the entity being proc
 ```js
 export const revision = 1     // bump to force re-render (cache-bust)
 export const format = 'webp'  // output format hint (used in the destination filename)
+export const options = {      // defaults for this preset (config can override)
+    concurrency: 1,           // how many of ITS renders may run at once
+}
 
 export default async ({ entity, runtime, logger }) => {
     // entity.source       — input file on disk
@@ -101,6 +104,38 @@ export default async ({ entity, runtime, logger }) => {
 ```
 
 That is the whole contract.
+
+### `concurrency` — a preset that spawns processes
+
+Preset renders are dispatched inline, which the engine runs at
+`runtime.options.threads` — **four by default**. That is the right width for
+work the engine can see: a sharp resize happens in-process and its memory is
+counted. A preset that shells out to `ffmpeg` is not. Four of those are four
+external processes the engine never hears about, and two of them measured at
+476MB and 329MB RSS beside mikser's own 580MB is enough to get a 2GB container
+OOM-killed — which leaves no error, no partial output and nothing in the log,
+just a build that stopped.
+
+So a preset says what it can afford, because it is the only thing that knows
+it spawns anything at all:
+
+```js
+export const options = { concurrency: 1 }
+```
+
+Or from config, which wins over the module's default:
+
+```js
+assets({ presets: { 'video-web': { match: '@/videos/*', options: { concurrency: 1 } } } })
+```
+
+- The cap is **per preset**, so one heavy video preset does not slow the
+  thumbnails.
+- Leaving it unset means unlimited, exactly as before. Nothing is throttled
+  that did not ask to be.
+- A preset that declares one is pinned to inline dispatch. In a worker pool
+  each thread would keep its own count and the cap would come out multiplied
+  by the pool size.
 
 ## Example: Video transcoding via ffmpeg
 
@@ -130,6 +165,9 @@ export default ({ entity: { name, source, destination, preset }, logger }) => {
 ```
 
 10 lines of glue around ffmpeg. Every published video in the catalog gets transcoded; rebuilds skip unchanged inputs because the journal tracks file mtimes; bumping `revision` re-encodes everything (useful when you change the bitrate).
+
+Add `export const options = { concurrency: 1 }` to it. Without one, four
+encodes run at once — see [`concurrency`](#concurrency--a-preset-that-spawns-processes).
 
 ## Example: Image variants via sharp
 
