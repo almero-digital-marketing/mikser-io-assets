@@ -23,7 +23,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { render, resetPresetGates, withGate } from '../lib/preset.js'
+import { render, resetPresetGates, withGate, gateState } from '../lib/preset.js'
 
 describe('a preset declaring how many of its renders may run at once', () => {
     let root
@@ -33,11 +33,42 @@ describe('a preset declaring how many of its renders may run at once', () => {
     })
     after(async () => { await rm(root, { recursive: true, force: true }) })
 
-    // Enough turns for every pending mkdir/stat to land, so "active" has
-    // stopped growing by the time it is read.
-    const settle = async (turns = 100) => {
-        for (let i = 0; i < turns; i++) await new Promise(resolve => setImmediate(resolve))
+    // Wait for a CONDITION, never for a number of turns.
+    //
+    // render() performs its own mkdir and stat before reaching the gate, so
+    // renders started in one tick arrive spread over many, and how many is a
+    // property of the machine. A fixed settle passed here and failed on CI
+    // with 1 of 3 renders arrived.
+    const waitFor = async (predicate, what, timeoutMs = 20000) => {
+        const deadline = Date.now() + timeoutMs
+        while (!predicate()) {
+            assert.ok(Date.now() < deadline, `timed out waiting for ${what}`)
+            await new Promise(resolve => setTimeout(resolve, 5))
+        }
     }
+
+    // Every render has reached the gate: some running, the rest queued. Once
+    // this holds the peak is final, so an over-admitting gate is visible and
+    // an over-restrictive one times out.
+    const allAtGate = (name, count) =>
+        waitFor(() => { const g = gateState(name); return g.active + g.waiting === count },
+            `all ${count} ${name} renders to reach the gate`)
+
+    // The uncapped path never touches a gate, so the condition IS the claim:
+    // all of them running at once.
+    const allRunning = (seen, count) =>
+        waitFor(() => seen.active === count, `all ${count} renders to run at once`)
+
+    // A gate that loses a slot deadlocks the rest of the queue, and a
+    // deadlocked await reports itself as a test that ran out of time with no
+    // reason attached. This gives it a reason.
+    const within = (promise, what, ms = 15000) => Promise.race([
+        promise,
+        new Promise((resolve, reject) => {
+            const timer = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), ms)
+            timer.unref?.()
+        }),
+    ])
 
     // A preset that parks inside the gate until it is let go.
     function holdingPreset() {
@@ -67,10 +98,10 @@ describe('a preset declaring how many of its renders may run at once', () => {
     it('runs one at a time when it asks for one', async () => {
         const { seen, preset, release } = holdingPreset()
         const all = start(6, { name: 'video', concurrency: 1, preset })
-        await settle()
+        await allAtGate('video', 6)
         assert.equal(seen.peak, 1, `${seen.peak} ran at once`)
         release()
-        await Promise.all(all)
+        await within(Promise.all(all), 'the gated renders to finish')
         assert.equal(seen.completed, 6, 'every render still ran')
         assert.equal(seen.peak, 1, 'and the cap held as the queue drained')
     })
@@ -78,10 +109,10 @@ describe('a preset declaring how many of its renders may run at once', () => {
     it('runs two at a time when it asks for two', async () => {
         const { seen, preset, release } = holdingPreset()
         const all = start(6, { name: 'video', concurrency: 2, preset })
-        await settle()
+        await allAtGate('video', 6)
         assert.equal(seen.peak, 2, `${seen.peak} ran at once`)
         release()
-        await Promise.all(all)
+        await within(Promise.all(all), 'the gated renders to finish')
         assert.equal(seen.completed, 6)
         assert.equal(seen.peak, 2)
     })
@@ -91,10 +122,10 @@ describe('a preset declaring how many of its renders may run at once', () => {
         // the thumbnail pipelines that were never the problem.
         const { seen, preset, release } = holdingPreset()
         const all = start(6, { name: 'thumb', preset })
-        await settle()
+        await allRunning(seen, 6)
         assert.equal(seen.peak, 6, 'an undeclared preset must not be throttled')
         release()
-        await Promise.all(all)
+        await within(Promise.all(all), 'the gated renders to finish')
     })
 
     it("does not let one preset's cap slow another", async () => {
@@ -104,12 +135,13 @@ describe('a preset declaring how many of its renders may run at once', () => {
             ...start(4, { name: 'video', concurrency: 1, preset: video.preset }),
             ...start(4, { name: 'thumb', preset: thumb.preset }),
         ]
-        await settle()
+        await allAtGate('video', 4)
+        await allRunning(thumb.seen, 4)
         assert.equal(video.seen.peak, 1)
         assert.equal(thumb.seen.peak, 4, 'an uncapped preset waited behind a capped one')
         video.release()
         thumb.release()
-        await Promise.all(all)
+        await within(Promise.all(all), 'the gated renders to finish')
     })
 
     it('keeps a separate cap per preset, not one shared between them', async () => {
@@ -124,12 +156,13 @@ describe('a preset declaring how many of its renders may run at once', () => {
             ...start(4, { name: 'video', concurrency: 1, preset: video.preset }),
             ...start(4, { name: 'audio', concurrency: 2, preset: audio.preset }),
         ]
-        await settle()
+        await allAtGate('video', 4)
+        await allAtGate('audio', 4)
         assert.equal(video.seen.peak, 1, `video ran ${video.seen.peak} at once under a cap of 1`)
         assert.equal(audio.seen.peak, 2, `audio ran ${audio.seen.peak} at once under a cap of 2`)
         video.release()
         audio.release()
-        await Promise.all(all)
+        await within(Promise.all(all), 'the gated renders to finish')
         assert.equal(video.seen.completed, 4)
         assert.equal(audio.seen.completed, 4)
     })
@@ -144,7 +177,9 @@ describe('a preset declaring how many of its renders may run at once', () => {
             await new Promise(resolve => setImmediate(resolve))
             throw new Error('ffmpeg exited 1')
         }
-        const results = await Promise.allSettled(start(3, { name: 'video', concurrency: 1, preset }))
+        const results = await within(
+            Promise.allSettled(start(3, { name: 'video', concurrency: 1, preset })),
+            'three failing renders to finish')
         assert.equal(started, 3, 'a throw held the slot and blocked the ones behind it')
         assert.ok(results.every(r => r.status === 'rejected'), 'the failures must still surface')
     })
@@ -154,20 +189,20 @@ describe('a preset declaring how many of its renders may run at once', () => {
             resetPresetGates()
             const { seen, preset, release } = holdingPreset()
             const all = start(4, { name: 'video', concurrency, preset })
-            await settle()
+            await allRunning(seen, 4)
             assert.equal(seen.peak, 4, `concurrency ${JSON.stringify(concurrency)} must not gate`)
             release()
-            await Promise.all(all)
+            await within(Promise.all(all), 'the gated renders to finish')
         }
     })
 
     it('drains a queue much longer than the cap', async () => {
         const { seen, preset, release } = holdingPreset()
         const all = start(25, { name: 'video', concurrency: 3, preset })
-        await settle()
+        await allAtGate('video', 25)
         assert.equal(seen.peak, 3)
         release()
-        await Promise.all(all)
+        await within(Promise.all(all), 'the gated renders to finish')
         assert.equal(seen.completed, 25, 'the gate stopped handing out slots')
         assert.equal(seen.peak, 3, 'and never exceeded the cap while draining')
     })
