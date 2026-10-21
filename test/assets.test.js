@@ -132,14 +132,14 @@ describe('normalizePresetConfig', () => {
     it('treats a bare string as a single match pattern', () => {
         assert.deepEqual(
             normalizePresetConfig('/files/images/*.jpg'),
-            { matches: ['/files/images/*.jpg'], options: {} },
+            { matches: ['/files/images/*.jpg'], options: {}, name: null },
         )
     })
 
     it('treats an array as a list of match patterns', () => {
         assert.deepEqual(
             normalizePresetConfig(['/files/**/*.jpg', '/resources/**/*.jpg']),
-            { matches: ['/files/**/*.jpg', '/resources/**/*.jpg'], options: {} },
+            { matches: ['/files/**/*.jpg', '/resources/**/*.jpg'], options: {}, name: null },
         )
     })
 
@@ -152,6 +152,7 @@ describe('normalizePresetConfig', () => {
             {
                 matches: ['/files/images/*.jpg'],
                 options: { width: 800, height: 600, quality: 80 },
+                name: null,
             },
         )
     })
@@ -162,15 +163,27 @@ describe('normalizePresetConfig', () => {
                 match: '/files/images/*.jpg',
                 options: { width: 800 },
             }),
-            { matches: ['/files/images/*.jpg'], options: { width: 800 } },
+            { matches: ['/files/images/*.jpg'], options: { width: 800 }, name: null },
         )
     })
 
     it('accepts options without match (preset configured but matches nothing yet)', () => {
         assert.deepEqual(
             normalizePresetConfig({ options: { width: 800 } }),
-            { matches: [], options: { width: 800 } },
+            { matches: [], options: { width: 800 }, name: null },
         )
+    })
+
+    it('carries a name function in the object form', () => {
+        const name = (entity) => `named/${entity.id}`
+        assert.deepEqual(
+            normalizePresetConfig({ match: '/frames/**', name }),
+            { matches: ['/frames/**'], options: {}, name },
+        )
+    })
+
+    it('ignores a name that is not a function', () => {
+        assert.equal(normalizePresetConfig({ match: '/frames/**', name: 'face' }).name, null)
     })
 
     it('falls back to treating the value as a single matcher for object literals without match/options keys', () => {
@@ -181,7 +194,7 @@ describe('normalizePresetConfig', () => {
         const matcher = { type: 'document' }
         assert.deepEqual(
             normalizePresetConfig(matcher),
-            { matches: [matcher], options: {} },
+            { matches: [matcher], options: {}, name: null },
         )
     })
 
@@ -189,13 +202,13 @@ describe('normalizePresetConfig', () => {
         const matcher = (e) => e.format === 'jpg'
         assert.deepEqual(
             normalizePresetConfig(matcher),
-            { matches: [matcher], options: {} },
+            { matches: [matcher], options: {}, name: null },
         )
     })
 
     it('returns empty matches and options for null/undefined', () => {
-        assert.deepEqual(normalizePresetConfig(null),      { matches: [], options: {} })
-        assert.deepEqual(normalizePresetConfig(undefined), { matches: [], options: {} })
+        assert.deepEqual(normalizePresetConfig(null),      { matches: [], options: {}, name: null })
+        assert.deepEqual(normalizePresetConfig(undefined), { matches: [], options: {}, name: null })
     })
 })
 
@@ -486,6 +499,114 @@ describe('assets plugin: the orphan sweep and a shared stem', () => {
 
             assert.equal(existsSync(gone), false,
                 'a derivative whose source is genuinely absent is still an orphan')
+        })
+    })
+})
+
+describe('assets plugin: a preset that names its derivatives', () => {
+    // A source whose own path is private — a client's phone number — served
+    // under a name the site chooses. `match` selects, `name` files.
+    const preset = `export const revision = 1\nexport const format = 'webp'\nexport default () => {}\n`
+    const frame = {
+        id: '/frames/Janus/0878562193_201026__F_WH.jpg', name: 'Janus/0878562193_201026__F_WH',
+        collection: 'frames', type: 'source', format: 'jpg', checksum: 'aaa',
+    }
+    const older = {
+        id: '/frames/Janus/0878562193_011025__F_WH.jpg', name: 'Janus/0878562193_011025__F_WH',
+        collection: 'frames', type: 'source', format: 'jpg', checksum: 'bbb',
+    }
+    // Only the latest report is shown, so only its frame is named.
+    const latest = (entity) => entity.id.includes('_201026__')
+        ? `d7cdd3df1bff/201026/${entity.id.split('__').pop()}`
+        : null
+    const face = { match: '/frames/**/*.jpg', name: latest }
+
+    it('renders to the name it was given, never the source path', async () => {
+        await withPresetProject({
+            entities: [frame], npmPresets: { face: preset }, assetsOptions: { presets: { face } },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: frame })
+            await h.runHook('processed')
+            await h.runHook('beforeRender')
+
+            const task = h.renderTasks.find(t => t.entity?.id === frame.id)
+            assert.ok(task, 'expected a render task')
+            const relative = path.relative(h.runtime.options.assetsFolder, task.entity.destination)
+            assert.equal(relative, path.join('face', 'd7cdd3df1bff', '201026', 'F_WH.webp'))
+            assert.ok(!task.entity.destination.includes('0878562193'), 'the private name stays out of the path')
+        })
+    })
+
+    it('stamps the same name on the source', async () => {
+        await withPresetProject({
+            entities: [frame], npmPresets: { face: preset }, assetsOptions: { presets: { face } },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: frame })
+            await h.runHook('processed')
+            const stamped = h.journal.find(entry => entry.entity.id === frame.id).entity.meta.presets.face
+            assert.match(stamped, /\/face\/d7cdd3df1bff\/201026\/F_WH\.webp$/)
+        })
+    })
+
+    it('does not take a source it names nothing', async () => {
+        await withPresetProject({
+            entities: [older], npmPresets: { face: preset }, assetsOptions: { presets: { face } },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: older })
+            await h.runHook('processed')
+            await h.runHook('beforeRender')
+            assert.equal(h.renderTasks.length, 0)
+            assert.equal(h.journal.find(entry => entry.entity.id === older.id).entity.meta?.presets, undefined)
+        })
+    })
+
+    it('does not render a source named nothing since it was journalled', async () => {
+        // A newer report arrived between the two: rendering the older one
+        // would put its bytes back under the name the newer one now owns.
+        let named = true
+        const fickle = { match: '/frames/**/*.jpg', name: (entity) => named ? latest(frame) : null }
+        await withPresetProject({
+            entities: [frame], npmPresets: { face: preset }, assetsOptions: { presets: { face: fickle } },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: frame })
+            await h.runHook('processed')
+            named = false
+            await h.runHook('beforeRender')
+            assert.equal(h.renderTasks.length, 0)
+        })
+    })
+
+    it('keeps a renamed derivative whose source is in the catalog', async () => {
+        // Keyed by the source's own name, the sweep finds no source for
+        // d7cdd3df1bff/201026/F_WH and deletes every photo on every build.
+        await withPresetProject({
+            entities: [frame, older], npmPresets: { face: preset },
+            runOptions: { force: true }, assetsOptions: { presets: { face } },
+        }, async (h) => {
+            const kept = path.join(h.runtime.options.assetsFolder, 'face', 'd7cdd3df1bff', '201026', 'F_WH.webp')
+            await mkdir(path.dirname(kept), { recursive: true })
+            await writeFile(kept, 'derived bytes')
+            await writeFile(`${kept}.1.md5`, 'marker')
+
+            await h.runHook('finalize')
+            assert.ok(existsSync(kept), 'a derivative its source still names was deleted')
+        })
+    })
+
+    it('removes one nothing is named to any more', async () => {
+        await withPresetProject({
+            entities: [frame, older], npmPresets: { face: preset },
+            runOptions: { force: true }, assetsOptions: { presets: { face } },
+        }, async (h) => {
+            const stale = path.join(h.runtime.options.assetsFolder, 'face', 'd7cdd3df1bff', '011025', 'F_WH.webp')
+            await mkdir(path.dirname(stale), { recursive: true })
+            await writeFile(stale, 'derived bytes')
+            await writeFile(`${stale}.1.md5`, 'marker')
+
+            await h.runHook('finalize')
+            assert.equal(existsSync(stale), false, 'the older report\'s derivative is an orphan')
+            const removed = h.logs.find(l => l.args.join(' ').includes('Assets removed'))
+            assert.match(format(...removed.args), /names nothing to it/)
         })
     })
 })

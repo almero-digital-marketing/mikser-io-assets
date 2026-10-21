@@ -230,6 +230,42 @@ the site, so a failed import would otherwise delete the whole assets folder.
 
 ---
 
+## Naming a derivative
+
+A derivative is filed under its source's own name — `files/media/hero.jpg`
+becomes `assets/web/media/hero.webp`. When that name must not reach a URL, the
+preset's config names it instead:
+
+```js
+assets({
+    presets: {
+        face: {
+            match: '/frames/**/*.jpg',
+            // '<phone>_<date>__F_WH.jpg' → '<hash>/<date>/F_WH.jpg'; null declines it
+            name: (entity) => facePath(entity),
+        },
+    },
+})
+```
+
+`match` selects and `name` files: it returns the path inside the preset's
+folder (the preset's `format` still sets the extension), or `null` to decline
+an entity `match` selected — a source a newer one has replaced, a frame the
+site does not show. It is asked again whenever the answer matters, so it can
+depend on state outside the entity:
+
+- the URL stamped on the source (`meta.presets`) and the render destination
+  both use it;
+- an entity it names nothing by the time it renders is not rendered, so a
+  replaced source never writes its old bytes under the name its successor
+  owns;
+- the orphan sweep asks it which source a derivative belongs to, so a
+  derivative it no longer names anything to is removed.
+
+Give each source its own name. Two sources named to one path at different
+times share a destination, and the older one's bookkeeping can claim the
+newer one's file.
+
 ## Derivatives with no source are removed
 
 A derivative can outlive its source: deleting a file removes its catalog row
@@ -247,7 +283,7 @@ otherwise delete the whole derived tree.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `presets` | `{}` | `{ name: pattern }` or `{ name: { match, options } }`. Patterns match entity ids. |
+| `presets` | `{}` | `{ name: pattern }` or `{ name: { match, options, name } }`. Patterns match entity ids; `name` files a derivative under a path of its own (see [Naming a derivative](#naming-a-derivative)). |
 | `assetsFolder` | `'assets'` | Where derivatives are written, relative to the working folder. Served through a symlink into the output. |
 | `presetsFolder` | `'presets'` | Where local preset modules live. |
 | `auditIgnore` | `[]` | Globs `--audit-output` should not report as orphans. For a preset that writes **more than one file**: the engine records the one destination it handed over, so extras are genuinely unclaimed and genuinely reported. |
