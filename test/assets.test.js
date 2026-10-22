@@ -508,11 +508,11 @@ describe('assets plugin: a preset that names its derivatives', () => {
     // under a name the site chooses. `match` selects, `name` files.
     const preset = `export const revision = 1\nexport const format = 'webp'\nexport default () => {}\n`
     const frame = {
-        id: '/frames/Janus/0878562193_201026__F_WH.jpg', name: 'Janus/0878562193_201026__F_WH',
+        id: '/frames/Janus/0000000000_201026__F_WH.jpg', name: 'Janus/0000000000_201026__F_WH',
         collection: 'frames', type: 'source', format: 'jpg', checksum: 'aaa',
     }
     const older = {
-        id: '/frames/Janus/0878562193_011025__F_WH.jpg', name: 'Janus/0878562193_011025__F_WH',
+        id: '/frames/Janus/0000000000_011025__F_WH.jpg', name: 'Janus/0000000000_011025__F_WH',
         collection: 'frames', type: 'source', format: 'jpg', checksum: 'bbb',
     }
     // Only the latest report is shown, so only its frame is named.
@@ -533,7 +533,7 @@ describe('assets plugin: a preset that names its derivatives', () => {
             assert.ok(task, 'expected a render task')
             const relative = path.relative(h.runtime.options.assetsFolder, task.entity.destination)
             assert.equal(relative, path.join('face', 'd7cdd3df1bff', '201026', 'F_WH.webp'))
-            assert.ok(!task.entity.destination.includes('0878562193'), 'the private name stays out of the path')
+            assert.ok(!task.entity.destination.includes('0000000000'), 'the private name stays out of the path')
         })
     })
 
