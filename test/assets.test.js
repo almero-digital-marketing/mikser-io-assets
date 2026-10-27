@@ -260,6 +260,30 @@ describe('assets plugin: per-preset options from config', () => {
         })
     })
 
+    it('names its tasks, so the engine keeps them apart from a page of the same entity', async () => {
+        // A source is often a page too, under the same id. Unnamed, a cycle
+        // that re-derived only the derivatives read to the manifest as the
+        // entity no longer producing its page, and the page was unlinked.
+        await withPresetProject({
+            entities: [fileEntity],
+            npmPresets: {
+                thumbnail:
+                    `export const revision = 1\n` +
+                    `export const options = { checksum: false }\n` +
+                    `export default () => {}\n`,
+            },
+            assetsOptions: { presets: { thumbnail: '@/files/*' } },
+        }, async (h) => {
+            await h.addJournalEntry({ operation: h.constants.OPERATION.CREATE, entity: fileEntity })
+            await h.runHook('processed')
+            await h.runHook('beforeRender')
+
+            const task = h.renderTasks.find(t => t.entity?.id === '/files/hero.jpg')
+            assert.ok(task, 'expected a render task')
+            assert.equal(task.options.dispatcher, 'assets')
+        })
+    })
+
     it('still works when the preset config uses the existing string form (no options merge)', async () => {
         await withPresetProject({
             entities: [fileEntity],
