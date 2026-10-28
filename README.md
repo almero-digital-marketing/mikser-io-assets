@@ -302,6 +302,14 @@ On the command line: `--assets <folder>`, `--presets <folder>`, and
 for what the incremental machinery cannot see (a preset edited without bumping
 `revision`, an image library upgraded underneath the build).
 
+A derivative that is already on disk with a current marker is reused, whatever
+the catalog remembers. Editing config wipes mikser's catalog — files are the
+source of truth — and a wiped catalog remembers no preset at all; that is not
+evidence any preset moved. The marker is the durable record and survives the
+wipe: the preset's revision is in its name, the source checksum is in its
+body. A preset the catalog has forgotten is therefore scheduled and then left
+to that check, so a config edit costs an import, not a re-derive.
+
 Forcing is per PRESET, not per source. `--render-presets web` re-derives the
 `web` derivative of every source it covers; the other presets of those same
 sources take their ordinary reuse decision. A bumped `revision` reads the same

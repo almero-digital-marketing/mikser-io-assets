@@ -45,7 +45,7 @@ const presetModule = (revision) =>
 // catalog remembers. A preset has moved when the two disagree — that is what
 // `notePresetChange` compares, and it is the only way to have one preset move
 // while its neighbour stays put.
-async function withDerivedProject({ onDisk, inCatalog, unmarked = [], manifested = [], runOptions = {} }, fn) {
+async function withDerivedProject({ onDisk, inCatalog, unmarked = [], manifested = [], remembered = true, runOptions = {} }, fn) {
     const workingFolder = await mkdtemp(path.join(tmpdir(), 'mikser-forced-'))
     try {
         await mkdir(path.join(workingFolder, 'presets'), { recursive: true })
@@ -75,10 +75,14 @@ async function withDerivedProject({ onDisk, inCatalog, unmarked = [], manifested
                 // compares against these; without them every preset reads as
                 // new and all of them would be forced, which is the state
                 // this test has to be able to tell apart from the bug.
-                ...Object.entries(inCatalog).map(([name, checksum]) => ({
+                // `remembered: false` is what the catalog looks like after a
+                // WIPE: the derivatives and their markers are on disk, and
+                // nothing in the catalog has heard of the presets that made
+                // them.
+                ...(remembered ? Object.entries(inCatalog).map(([name, checksum]) => ({
                     id: `/presets/${name}`, name, collection: 'presets', type: 'preset',
                     checksum, matches: [match],
-                })),
+                })) : []),
             ],
         })
 
@@ -122,20 +126,45 @@ describe('a preset whose revision moved', () => {
         })
     })
 
-    it('leaves the markers of the presets it did not move alone', async () => {
-        // The marker is removed before a render, so forcing a preset that had
-        // nothing to do also threw away the evidence that its derivative was
-        // current — and the next build's unfinished sweep then re-derived it
-        // again.
+    it('names the markers its render invalidates and deletes none of them yet', async () => {
+        // Planning decides; it does not render. A marker removed on the
+        // decision is lost even when the task is then dropped — and the shape
+        // that leaves behind is the worst available: derivatives intact,
+        // nothing claiming them, every later build re-deriving all of them.
         await withDerivedProject({
             onDisk:    { a: 2, b: 1 },
             inCatalog: { a: 1, b: 1 },
-        }, async ({ h, derivative }) => {
+        }, async ({ h, taskFor, derivative }) => {
             const { existsSync } = await import('node:fs')
+            assert.equal(existsSync(`${derivative('a')}.1.md5`), true,
+                'planning deleted a marker; only a render may do that')
             assert.equal(existsSync(`${derivative('b')}.1.md5`), true,
                 "b's marker was removed for a render b did not need")
+
+            assert.deepEqual(taskFor('a').options.presetMarkers, [`${derivative('a')}.1.md5`],
+                "a is being re-derived, so its render must clear a's stale marker")
+            assert.equal(taskFor('b').options.presetMarkers, undefined,
+                'b is reused — there is nothing for it to invalidate')
+        })
+    })
+
+    it('clears them when the render actually runs', async () => {
+        await withDerivedProject({
+            onDisk:    { a: 2, b: 1 },
+            inCatalog: { a: 1, b: 1 },
+        }, async ({ taskFor, derivative }) => {
+            const { existsSync } = await import('node:fs')
+            const { render } = await import('../lib/preset.js')
+            const task = taskFor('a')
+            await render({
+                entity: task.entity,
+                options: task.options,
+                runtime: { preset: async () => {} },
+            })
             assert.equal(existsSync(`${derivative('a')}.1.md5`), false,
-                "a's marker must go — it is about to be re-derived")
+                'the render ran, so the claim it invalidated must be gone')
+            assert.equal(existsSync(`${derivative('b')}.1.md5`), true,
+                "and only that one — b's render never ran")
         })
     })
 })
@@ -218,6 +247,42 @@ describe('a derivative left without a completed-render marker', () => {
             assert.ok(warned, 'expected a preset-unfinished warning')
             assert.equal(warned.args[0].derivatives.length, 2)
             assert.equal(warned.args[1 + 1], 2, 'the count must match the list')
+        })
+    })
+})
+
+describe('a preset the catalog does not remember', () => {
+    it('is still scheduled, so its sources are reached at all', async () => {
+        // The fan-out is the only thing that reaches these entities: their
+        // sources did not change, so nothing journalled them. Drop the
+        // scheduling and a preset dropped into presets/ while watching
+        // produces nothing until something else happens to touch its sources.
+        await withDerivedProject({
+            onDisk:    { a: 1, b: 1 },
+            inCatalog: { a: 1, b: 1 },
+            remembered: false,
+        }, ({ h }) => {
+            assert.equal(h.renderTasks.length, 2,
+                'nothing reached the sources, so the presets covering them were never considered')
+        })
+    })
+
+    it('is not treated as having moved', async () => {
+        // The live incident. An absent prior is what a wiped catalog looks
+        // like, not evidence that a preset changed — and reading it as the
+        // latter re-rendered every derivative on the site past a marker
+        // nobody consulted.
+        await withDerivedProject({
+            onDisk:    { a: 1, b: 1 },
+            inCatalog: { a: 1, b: 1 },
+            remembered: false,
+        }, ({ taskFor }) => {
+            for (const name of ['a', 'b']) {
+                assert.equal(taskFor(name).options.rendererChanged, false,
+                    `${name} was forced because the catalog had forgotten it`)
+                assert.equal(taskFor(name).options.ignore, true,
+                    `${name}'s marker is current and its derivative is on disk`)
+            }
         })
     })
 })
