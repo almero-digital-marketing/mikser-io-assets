@@ -302,6 +302,17 @@ On the command line: `--assets <folder>`, `--presets <folder>`, and
 for what the incremental machinery cannot see (a preset edited without bumping
 `revision`, an image library upgraded underneath the build).
 
+Forcing is per PRESET, not per source. `--render-presets web` re-derives the
+`web` derivative of every source it covers; the other presets of those same
+sources take their ordinary reuse decision. A bumped `revision` reads the same
+way — it re-derives what that preset owns and nothing beside it. The line it
+prints counts both, because the sources alone do not say how much work was
+queued:
+
+```
+Presets re-rendering: web (4812 derivative(s) across 4812 source(s))
+```
+
 ## Codes
 
 | Code | Meaning |
