@@ -316,11 +316,38 @@ the output folder at finalize, which it does whether or not this package is
 installed. The render track and that check are substrate; producing the files
 is this package's job.
 
+## What a cycle reports
+
+Planning is the step between "the journal says these entities moved" and "the
+dispatcher has tasks". It runs once per entity per preset, so it grows with
+the product of the two, and it used to be invisible: on a site with 6,800
+entities and 29 presets there were two minutes between one journal line and
+the next, with the process at 100% of a core and answering nothing.
+
+```
+Assets marker scan: 1.4s
+Assets unfinished sweep: 0.3s
+Assets planning: 20287 render task(s), 20287 reused, in 6.3s, first dispatched after 68ms
+```
+
+Each line is `info` when the step took a second or more and `debug` otherwise,
+so an ordinary incremental cycle stays quiet. `first dispatched after` is the
+streaming property: tasks go to the dispatcher in batches as they are planned,
+not in one write at the end.
+
+The engine's own `First render after` line sits next to these — see
+[Where a cycle spends its time](https://github.com/almero-digital-marketing/mikser-io/blob/main/docs/diagnostics.md).
+
+Planning gives the event loop a turn regularly, so HTTP and MCP keep answering
+while it runs. It is still one thread: a cycle at this size takes as long as
+it takes, and what changed is that it says so and stays reachable.
+
 ## Limits
 
-Preset renders are dispatched INLINE. A worker sees an empty renderer registry
-and resolves by package name (`mikser-io-render-<name>`), which this package
-does not provide — so `task: worker` is not available for presets.
+A derivative's reuse is decided from the completed-render marker, which is
+keyed on the SOURCE checksum. A preset that writes more than one file gets a
+marker for the destination the engine handed it and no claim on the rest; name
+those in `auditIgnore`.
 
 ## Licence
 
