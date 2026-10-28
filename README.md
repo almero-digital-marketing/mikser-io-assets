@@ -133,9 +133,18 @@ assets({ presets: { 'video-web': { match: '@/videos/*', options: { concurrency: 
   thumbnails.
 - Leaving it unset means unlimited, exactly as before. Nothing is throttled
   that did not ask to be.
-- A preset that declares one is pinned to inline dispatch. In a worker pool
-  each thread would keep its own count and the cap would come out multiplied
-  by the pool size.
+- **A cap no longer means "on the main thread."** The engine's render
+  dispatcher holds it, around the dispatch and before inline/worker is
+  chosen, so one counter bounds every mode. Add `tasks: 'worker'` beside it
+  and a capped, CPU-bound preset runs on the worker pool with its cap intact:
+
+  ```js
+  export const options = { concurrency: 2, tasks: 'worker' }
+  ```
+
+  That needs mikser-io 11.19.0 or later. Dispatch stays inline by default,
+  as it does for every render — the cap stops implying the main thread
+  without starting to imply a worker.
 
 ## Example: Video transcoding via ffmpeg
 

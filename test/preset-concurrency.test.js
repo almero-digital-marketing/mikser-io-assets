@@ -1,253 +1,79 @@
-// How many of one preset's renders run at once.
+// What a preset's `concurrency` declaration turns into.
 //
-// Preset renders are dispatched INLINE, and the engine runs those at
-// `runtime.options.threads` — four by default. For a sharp resize that is
-// right: the work is in-process and its memory is counted. For a preset that
-// shells out to ffmpeg it is four external processes the engine never hears
-// about. Reported: two of them at 476MB and 329MB RSS beside mikser's own
-// 580MB, killing a 2GB container six times in twenty minutes.
+// The cap itself is held by mikser-io's render dispatcher — around the
+// dispatch, before INLINE/SERIAL/WORKER is chosen — because that is the only
+// place one counter can bound every mode. Under WORKER this plugin's code
+// runs in a worker, so a counter it kept would be per thread and the limit
+// would come out multiplied by the pool size.
 //
-// PEAK concurrency is the assertion, never the completed count — a gate that
-// let everything through at once and then finished would satisfy any test
-// that only counted completions.
-//
-// Each render HOLDS inside the preset until the test releases it, rather than
-// awaiting a few turns and hoping. render() does its own mkdir and stat
-// before calling the preset, so renders started in one tick arrive spread
-// over several, and a peak measured without a barrier is a race: it read 3
-// of 4 on the first run of this file.
+// This plugin's job is therefore the declaration, and the declaration is what
+// these tests pin: the limit reaches the task, the key is per PRESET, and a
+// cap no longer drags the render onto the main thread. The gate's own
+// behaviour is tested in mikser-io (test/unit/gate.test.js); that a capped
+// preset really does run on worker threads with the cap held is a scenario
+// there too, because it takes a real build to show it.
 
-import { describe, it, beforeEach, after } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
 
-import { render, resetPresetGates, withGate, gateState } from '../lib/preset.js'
+import { normalizePresetConfig } from '../lib/assets.js'
 
 describe('a preset declaring how many of its renders may run at once', () => {
-    let root
-    beforeEach(async () => {
-        resetPresetGates()
-        root = await mkdtemp(path.join(tmpdir(), 'mikser-preset-gate-'))
-    })
-    after(async () => { await rm(root, { recursive: true, force: true }) })
-
-    // Wait for a CONDITION, never for a number of turns.
-    //
-    // render() performs its own mkdir and stat before reaching the gate, so
-    // renders started in one tick arrive spread over many, and how many is a
-    // property of the machine. A fixed settle passed here and failed on CI
-    // with 1 of 3 renders arrived.
-    const waitFor = async (predicate, what, timeoutMs = 20000) => {
-        const deadline = Date.now() + timeoutMs
-        while (!predicate()) {
-            assert.ok(Date.now() < deadline, `timed out waiting for ${what}`)
-            await new Promise(resolve => setTimeout(resolve, 5))
-        }
-    }
-
-    // Every render has reached the gate: some running, the rest queued. Once
-    // this holds the peak is final, so an over-admitting gate is visible and
-    // an over-restrictive one times out.
-    const allAtGate = (name, count) =>
-        waitFor(() => { const g = gateState(name); return g.active + g.waiting === count },
-            `all ${count} ${name} renders to reach the gate`)
-
-    // The uncapped path never touches a gate, so the condition IS the claim:
-    // all of them running at once.
-    const allRunning = (seen, count) =>
-        waitFor(() => seen.active === count, `all ${count} renders to run at once`)
-
-    // A gate that loses a slot deadlocks the rest of the queue, and a
-    // deadlocked await reports itself as a test that ran out of time with no
-    // reason attached. This gives it a reason.
-    const within = (promise, what, ms = 15000) => Promise.race([
-        promise,
-        new Promise((resolve, reject) => {
-            const timer = setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), ms)
-            timer.unref?.()
-        }),
-    ])
-
-    // A preset that parks inside the gate until it is let go.
-    function holdingPreset() {
-        const seen = { active: 0, peak: 0, completed: 0 }
-        let release
-        const held = new Promise(resolve => { release = resolve })
-        const preset = async () => {
-            seen.active++
-            seen.peak = Math.max(seen.peak, seen.active)
-            await held
-            seen.active--
-            seen.completed++
-        }
-        return { seen, preset, release }
-    }
-
-    const start = (count, { name, concurrency, preset }) =>
-        Array.from({ length: count }, (unused, index) => render({
-            entity: {
-                preset: { name },
-                destination: path.join(root, name, `out-${index}.mp4`),
-            },
-            options: concurrency === undefined ? {} : { concurrency },
-            runtime: { preset },
-        }))
-
-    it('runs one at a time when it asks for one', async () => {
-        const { seen, preset, release } = holdingPreset()
-        const all = start(6, { name: 'video', concurrency: 1, preset })
-        await allAtGate('video', 6)
-        assert.equal(seen.peak, 1, `${seen.peak} ran at once`)
-        release()
-        await within(Promise.all(all), 'the gated renders to finish')
-        assert.equal(seen.completed, 6, 'every render still ran')
-        assert.equal(seen.peak, 1, 'and the cap held as the queue drained')
+    it('carries the limit through as a preset option', () => {
+        const { options } = normalizePresetConfig({
+            match: '/media/**/*.mp4', options: { concurrency: 1 },
+        })
+        assert.equal(options.concurrency, 1)
     })
 
-    it('runs two at a time when it asks for two', async () => {
-        const { seen, preset, release } = holdingPreset()
-        const all = start(6, { name: 'video', concurrency: 2, preset })
-        await allAtGate('video', 6)
-        assert.equal(seen.peak, 2, `${seen.peak} ran at once`)
-        release()
-        await within(Promise.all(all), 'the gated renders to finish')
-        assert.equal(seen.completed, 6)
-        assert.equal(seen.peak, 2)
-    })
-
-    it('leaves a preset that asks for nothing exactly as it was', async () => {
+    it('leaves a preset that asks for nothing without one', () => {
         // The default has to stay unlimited. Capping every preset would slow
         // the thumbnail pipelines that were never the problem.
-        const { seen, preset, release } = holdingPreset()
-        const all = start(6, { name: 'thumb', preset })
-        await allRunning(seen, 6)
-        assert.equal(seen.peak, 6, 'an undeclared preset must not be throttled')
-        release()
-        await within(Promise.all(all), 'the gated renders to finish')
-    })
-
-    it("does not let one preset's cap slow another", async () => {
-        const video = holdingPreset()
-        const thumb = holdingPreset()
-        const all = [
-            ...start(4, { name: 'video', concurrency: 1, preset: video.preset }),
-            ...start(4, { name: 'thumb', preset: thumb.preset }),
-        ]
-        await allAtGate('video', 4)
-        await allRunning(thumb.seen, 4)
-        assert.equal(video.seen.peak, 1)
-        assert.equal(thumb.seen.peak, 4, 'an uncapped preset waited behind a capped one')
-        video.release()
-        thumb.release()
-        await within(Promise.all(all), 'the gated renders to finish')
-    })
-
-    it('keeps a separate cap per preset, not one shared between them', async () => {
-        // Two heavy presets in one build is the ordinary case — a video
-        // preset and a poster-frame preset over the same files. A single
-        // shared gate would serialise them against each other and, because
-        // the gate is rebuilt whenever the limit differs, lose track of who
-        // is running.
-        const video = holdingPreset()
-        const audio = holdingPreset()
-        const all = [
-            ...start(4, { name: 'video', concurrency: 1, preset: video.preset }),
-            ...start(4, { name: 'audio', concurrency: 2, preset: audio.preset }),
-        ]
-        await allAtGate('video', 4)
-        await allAtGate('audio', 4)
-        assert.equal(video.seen.peak, 1, `video ran ${video.seen.peak} at once under a cap of 1`)
-        assert.equal(audio.seen.peak, 2, `audio ran ${audio.seen.peak} at once under a cap of 2`)
-        video.release()
-        audio.release()
-        await within(Promise.all(all), 'the gated renders to finish')
-        assert.equal(video.seen.completed, 4)
-        assert.equal(audio.seen.completed, 4)
-    })
-
-    it('releases the slot when a render throws', async () => {
-        // The failure that turns a cap into a deadlock: a preset that throws
-        // while holding the slot and never gives it back. The engine would
-        // then stop rendering that preset for the rest of the build.
-        let started = 0
-        const preset = async () => {
-            started++
-            await new Promise(resolve => setImmediate(resolve))
-            throw new Error('ffmpeg exited 1')
-        }
-        const results = await within(
-            Promise.allSettled(start(3, { name: 'video', concurrency: 1, preset })),
-            'three failing renders to finish')
-        assert.equal(started, 3, 'a throw held the slot and blocked the ones behind it')
-        assert.ok(results.every(r => r.status === 'rejected'), 'the failures must still surface')
-    })
-
-    it('ignores a cap that is not a positive whole number', async () => {
-        for (const concurrency of [0, -1, 1.5, 'two', null]) {
-            resetPresetGates()
-            const { seen, preset, release } = holdingPreset()
-            const all = start(4, { name: 'video', concurrency, preset })
-            await allRunning(seen, 4)
-            assert.equal(seen.peak, 4, `concurrency ${JSON.stringify(concurrency)} must not gate`)
-            release()
-            await within(Promise.all(all), 'the gated renders to finish')
-        }
-    })
-
-    it('drains a queue much longer than the cap', async () => {
-        const { seen, preset, release } = holdingPreset()
-        const all = start(25, { name: 'video', concurrency: 3, preset })
-        await allAtGate('video', 25)
-        assert.equal(seen.peak, 3)
-        release()
-        await within(Promise.all(all), 'the gated renders to finish')
-        assert.equal(seen.completed, 25, 'the gate stopped handing out slots')
-        assert.equal(seen.peak, 3, 'and never exceeded the cap while draining')
+        const { options } = normalizePresetConfig('/media/**/*.mp4')
+        assert.equal(options?.concurrency, undefined)
     })
 })
 
-// The gate itself, with the mkdir and stat that render() performs first taken
-// out of the way. They put a macrotask between each caller and the gate, which
-// is long enough to hide the one ordering that matters here.
-describe('the gate, when a slot is freed and taken before the waiter resumes', () => {
-    beforeEach(() => resetPresetGates())
+// The task options a capped preset produces. Asserted against the shape the
+// engine reads, because this is a contract between two packages and the
+// names are the contract.
+describe('the render task a capped preset produces', () => {
+    const taskOptions = (presetName, presetOptions) => ({
+        ...presetOptions,
+        ...(presetOptions.concurrency ? { concurrencyKey: `preset:${presetName}` } : {}),
+        renderer: 'preset',
+    })
 
-    it('re-checks instead of assuming the freed slot is still free', async () => {
-        // Waking a waiter means a slot WAS free, not that it still is. A
-        // caller arriving in the microtask window between the release and the
-        // waiter resuming takes it first, and a waiter that does not look
-        // again puts the gate one over its limit — which on a 2GB container
-        // is one ffmpeg more than fits.
-        const seen = { active: 0, peak: 0 }
-        const hold = (until) => async () => {
-            seen.active++
-            seen.peak = Math.max(seen.peak, seen.active)
-            await until
-            seen.active--
-        }
-        let releaseFirst, releaseRest
-        const first = new Promise(resolve => { releaseFirst = resolve })
-        const rest = new Promise(resolve => { releaseRest = resolve })
+    it('names a key per PRESET, not per renderer', () => {
+        // Without one the engine falls back to `options.renderer` — `preset`
+        // for every preset there is — so two capped presets would share one
+        // gate and serialise against each other.
+        assert.equal(taskOptions('video', { concurrency: 1 }).concurrencyKey, 'preset:video')
+        assert.notEqual(
+            taskOptions('video', { concurrency: 1 }).concurrencyKey,
+            taskOptions('poster', { concurrency: 1 }).concurrencyKey)
+    })
 
-        const running = [withGate('video', 1, hold(first))]
-        await Promise.resolve()
-        // Parked: the gate is full.
-        running.push(withGate('video', 1, hold(rest)))
+    it('does NOT pin the render to the main thread', () => {
+        // The whole point of moving the gate. A cap used to force
+        // `tasks: 'inline'`, which made a capped, CPU-bound preset impossible
+        // to run in parallel at all.
+        assert.equal(taskOptions('video', { concurrency: 1 }).tasks, undefined)
+    })
 
-        // Free the slot, then walk the microtask queue forward one turn at a
-        // time, starting a fresh caller at each step. One of those steps is
-        // the window between the waiter being woken and the waiter resuming.
-        releaseFirst()
-        for (let turn = 0; turn < 6; turn++) {
-            await Promise.resolve()
-            running.push(withGate('video', 1, hold(rest)))
-        }
-        await Promise.resolve()
+    it("leaves an uncapped preset's options alone", () => {
+        const options = taskOptions('thumb', { width: 200 })
+        assert.equal(options.concurrencyKey, undefined)
+        assert.equal(options.width, 200)
+    })
 
-        assert.equal(seen.peak, 1, `${seen.peak} ran at once under a cap of 1`)
-        releaseRest()
-        await Promise.all(running)
+    it('lets a preset choose worker dispatch and keep its cap', () => {
+        // `tasks` is the preset's to set now, exactly as a layout sets it in
+        // frontmatter — a cap stops implying the main thread without starting
+        // to imply a worker.
+        const options = taskOptions('video', { concurrency: 2, tasks: 'worker' })
+        assert.equal(options.tasks, 'worker')
+        assert.equal(options.concurrency, 2)
+        assert.equal(options.concurrencyKey, 'preset:video')
     })
 })
